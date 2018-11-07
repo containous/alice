@@ -3,10 +3,10 @@ package alice
 
 import "net/http"
 
-// A constructor for a piece of middleware.
+// Constructor A constructor for a piece of middleware.
 // Some middleware use this constructor out of the box,
 // so in most cases you can just pass somepackage.New
-type Constructor func(http.Handler) http.Handler
+type Constructor func(http.Handler) (http.Handler, error)
 
 // Chain acts as a list of http.Handler constructors.
 // Chain is effectively immutable:
@@ -21,7 +21,7 @@ type Chain struct {
 // New serves no other function,
 // constructors are only called upon a call to Then().
 func New(constructors ...Constructor) Chain {
-	return Chain{append(([]Constructor)(nil), constructors...)}
+	return Chain{constructors: constructors}
 }
 
 // Then chains the middleware and returns the final http.Handler.
@@ -42,16 +42,20 @@ func New(constructors ...Constructor) Chain {
 // For proper middleware, this should cause no problems.
 //
 // Then() treats nil as http.DefaultServeMux.
-func (c Chain) Then(h http.Handler) http.Handler {
+func (c Chain) Then(h http.Handler) (http.Handler, error) {
 	if h == nil {
 		h = http.DefaultServeMux
 	}
 
 	for i := range c.constructors {
-		h = c.constructors[len(c.constructors)-1-i](h)
+		handler, err := c.constructors[len(c.constructors)-1-i](h)
+		if err != nil {
+			return nil, err
+		}
+		h = handler
 	}
 
-	return h
+	return h, nil
 }
 
 // ThenFunc works identically to Then, but takes
@@ -62,7 +66,7 @@ func (c Chain) Then(h http.Handler) http.Handler {
 //     c.ThenFunc(fn)
 //
 // ThenFunc provides all the guarantees of Then.
-func (c Chain) ThenFunc(fn http.HandlerFunc) http.Handler {
+func (c Chain) ThenFunc(fn http.HandlerFunc) (http.Handler, error) {
 	if fn == nil {
 		return c.Then(nil)
 	}

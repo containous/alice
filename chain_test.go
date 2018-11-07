@@ -1,4 +1,3 @@
-// Package alice implements a middleware chaining solution.
 package alice
 
 import (
@@ -6,17 +5,24 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // A constructor for middleware
 // that writes its own "tag" into the RW and does nothing else.
 // Useful in checking if a chain is behaving in the right order.
 func tagMiddleware(tag string) Constructor {
-	return func(h http.Handler) http.Handler {
+	return func(h http.Handler) (http.Handler, error) {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte(tag))
+			_, err := w.Write([]byte(tag))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			h.ServeHTTP(w, r)
-		})
+		}), nil
 	}
 }
 
@@ -29,16 +35,19 @@ func funcsEqual(f1, f2 interface{}) bool {
 }
 
 var testApp = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("app\n"))
+	_, err := w.Write([]byte("app\n"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 })
 
 func TestNew(t *testing.T) {
-	c1 := func(h http.Handler) http.Handler {
-		return nil
+	c1 := func(h http.Handler) (http.Handler, error) {
+		return nil, nil
 	}
 
-	c2 := func(h http.Handler) http.Handler {
-		return http.StripPrefix("potato", nil)
+	c2 := func(h http.Handler) (http.Handler, error) {
+		return http.StripPrefix("potato", nil), nil
 	}
 
 	slice := []Constructor{c1, c2}
@@ -52,19 +61,28 @@ func TestNew(t *testing.T) {
 }
 
 func TestThenWorksWithNoMiddleware(t *testing.T) {
-	if !funcsEqual(New().Then(testApp), testApp) {
+	handler, err := New().Then(testApp)
+	require.NoError(t, err)
+
+	if !funcsEqual(handler, testApp) {
 		t.Error("Then does not work with no middleware")
 	}
 }
 
 func TestThenTreatsNilAsDefaultServeMux(t *testing.T) {
-	if New().Then(nil) != http.DefaultServeMux {
+	handler, err := New().Then(nil)
+	require.NoError(t, err)
+
+	if handler != http.DefaultServeMux {
 		t.Error("Then does not treat nil as DefaultServeMux")
 	}
 }
 
 func TestThenFuncTreatsNilAsDefaultServeMux(t *testing.T) {
-	if New().ThenFunc(nil) != http.DefaultServeMux {
+	handler, err := New().ThenFunc(nil)
+	require.NoError(t, err)
+
+	if handler != http.DefaultServeMux {
 		t.Error("ThenFunc does not treat nil as DefaultServeMux")
 	}
 }
@@ -73,7 +91,9 @@ func TestThenFuncConstructsHandlerFunc(t *testing.T) {
 	fn := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 	})
-	chained := New().ThenFunc(fn)
+
+	chained, err := New().ThenFunc(fn)
+	require.NoError(t, err)
 	rec := httptest.NewRecorder()
 
 	chained.ServeHTTP(rec, (*http.Request)(nil))
@@ -88,13 +108,12 @@ func TestThenOrdersHandlersCorrectly(t *testing.T) {
 	t2 := tagMiddleware("t2\n")
 	t3 := tagMiddleware("t3\n")
 
-	chained := New(t1, t2, t3).Then(testApp)
+	chained, err := New(t1, t2, t3).Then(testApp)
+	require.NoError(t, err)
 
 	w := httptest.NewRecorder()
-	r, err := http.NewRequest("GET", "/", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	r, err := http.NewRequest(http.MethodGet, "/", nil)
+	require.NoError(t, err)
 
 	chained.ServeHTTP(w, r)
 
@@ -107,20 +126,15 @@ func TestAppendAddsHandlersCorrectly(t *testing.T) {
 	chain := New(tagMiddleware("t1\n"), tagMiddleware("t2\n"))
 	newChain := chain.Append(tagMiddleware("t3\n"), tagMiddleware("t4\n"))
 
-	if len(chain.constructors) != 2 {
-		t.Error("chain should have 2 constructors")
-	}
-	if len(newChain.constructors) != 4 {
-		t.Error("newChain should have 4 constructors")
-	}
+	assert.Len(t, chain.constructors, 2)
+	assert.Len(t, newChain.constructors, 4)
 
-	chained := newChain.Then(testApp)
+	chained, err := newChain.Then(testApp)
+	require.NoError(t, err)
 
 	w := httptest.NewRecorder()
-	r, err := http.NewRequest("GET", "/", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	r, err := http.NewRequest(http.MethodGet, "/", nil)
+	require.NoError(t, err)
 
 	chained.ServeHTTP(w, r)
 
@@ -143,23 +157,16 @@ func TestExtendAddsHandlersCorrectly(t *testing.T) {
 	chain2 := New(tagMiddleware("t3\n"), tagMiddleware("t4\n"))
 	newChain := chain1.Extend(chain2)
 
-	if len(chain1.constructors) != 2 {
-		t.Error("chain1 should contain 2 constructors")
-	}
-	if len(chain2.constructors) != 2 {
-		t.Error("chain2 should contain 2 constructors")
-	}
-	if len(newChain.constructors) != 4 {
-		t.Error("newChain should contain 4 constructors")
-	}
+	assert.Len(t, chain1.constructors, 2)
+	assert.Len(t, chain2.constructors, 2)
+	assert.Len(t, newChain.constructors, 4)
 
-	chained := newChain.Then(testApp)
+	chained, err := newChain.Then(testApp)
+	require.NoError(t, err)
 
 	w := httptest.NewRecorder()
-	r, err := http.NewRequest("GET", "/", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	r, err := http.NewRequest(http.MethodGet, "/", nil)
+	require.NoError(t, err)
 
 	chained.ServeHTTP(w, r)
 
